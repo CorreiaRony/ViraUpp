@@ -30,32 +30,63 @@ const schema = {
         required: ["label", "score", "action", "why", "suggestion"]
       }
     },
+    first3Seconds: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        score: { type: "integer", minimum: 0, maximum: 100 },
+        visualHook: { type: "string" },
+        verbalHook: { type: "string" },
+        textOnScreen: { type: "string" },
+        recommendation: { type: "string" }
+      },
+      required: ["score", "visualHook", "verbalHook", "textOnScreen", "recommendation"]
+    },
+    timeline: {
+      type: "array",
+      minItems: 3,
+      maxItems: 6,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          period: { type: "string" },
+          attention: { type: "string", enum: ["Alta", "Moderada", "Baixa"] },
+          score: { type: "integer", minimum: 0, maximum: 100 },
+          diagnosis: { type: "string" },
+          action: { type: "string" }
+        },
+        required: ["period", "attention", "score", "diagnosis", "action"]
+      }
+    },
+    editingTips: { type: "array", minItems: 3, maxItems: 4, items: { type: "string" } },
     cover: { type: "string" },
     caption: { type: "string" },
     hashtags: { type: "array", minItems: 3, maxItems: 3, items: { type: "string" } },
     cta: { type: "string" },
     pinnedComment: { type: "string" }
   },
-  required: ["score", "confidence", "recommendation", "niche", "nicheConfidence", "summary", "principalStrength", "principalRisk", "performanceProbability", "metrics", "cover", "caption", "hashtags", "cta", "pinnedComment"]
+  required: ["score", "confidence", "recommendation", "niche", "nicheConfidence", "summary", "principalStrength", "principalRisk", "performanceProbability", "metrics", "first3Seconds", "timeline", "editingTips", "cover", "caption", "hashtags", "cta", "pinnedComment"]
 };
 
-const instructions = `Você é o motor de inteligência da ViraUpp, um copiloto para criadores de vídeos curtos.
-Sua função é avaliar probabilidade de performance, nunca prometer viralização.
-Analise o conteúdo em português do Brasil considerando o objetivo e o nicho informado ou inferido.
+const instructions = `Você é o motor de inteligência da ViraUpp, um copiloto para criadores de TikTok, Reels e Shorts.
+Sua função é avaliar probabilidade de performance e orientar decisões de edição. Nunca prometa viralização e nunca invente dados reais de retenção.
 
-PRINCÍPIOS OBRIGATÓRIOS:
+PRINCÍPIOS:
 1. Não procure defeitos só para parecer útil. Se algo já está forte, diga MANTER.
-2. Uma mudança só deve ser sugerida quando houver motivo concreto e ganho provável.
-3. Explique o porquê com referência específica ao conteúdo enviado, não com frases genéricas.
-4. Diferencie boas práticas gerais de sinais daquele nicho e objetivo.
-5. Não invente métricas reais do TikTok. O score é heurístico/probabilístico.
-6. Capa deve gerar curiosidade sem entregar cedo demais o payoff.
-7. Legenda deve soar humana e natural, não como texto publicitário genérico.
-8. Retorne exatamente 3 hashtags úteis: uma de nicho, uma do assunto e uma contextual/de descoberta. Evite #fyp, #viral e #foryou por padrão.
-9. CTA só deve existir se ajudar. Se um CTA explícito puder piorar o conteúdo, use uma orientação sutil.
-10. Para cada métrica, suggestion deve ser uma string. Quando a ação for MANTER, escreva em suggestion algo curto como 'Não altere este elemento.'
+2. Só sugira mudança quando houver motivo concreto e ganho provável.
+3. Seja específico ao conteúdo enviado. Evite frases genéricas como 'melhore o gancho'.
+4. Considere o objetivo: views, seguidores, engajamento ou vendas.
+5. Se houver frames, faça leitura visual dos primeiros 3 segundos: enquadramento, movimento percebido, texto visível, contraste, pessoa/objeto em cena e mudança entre frames.
+6. Se não houver áudio/transcrição, diga claramente que o gancho verbal não pode ser validado e baseie-se no contexto textual.
+7. A timeline é uma ESTIMATIVA de risco de atenção, não analytics reais. Construa 3 a 6 trechos coerentes com a duração informada ou, sem duração, com a estrutura textual.
+8. Capa deve gerar curiosidade sem entregar o payoff cedo demais.
+9. Legenda deve soar humana e natural.
+10. Retorne exatamente 3 hashtags úteis: uma de nicho, uma do assunto e uma contextual/de descoberta. Evite #fyp, #viral e #foryou por padrão.
+11. Para cada métrica, suggestion deve ser uma string. Se a ação for MANTER, use uma orientação curta como 'Não altere este elemento.'
+12. Em editingTips, entregue apenas ajustes práticos de edição: corte, pausa, texto, B-roll, zoom, enquadramento, ordem ou timing. Se algo não precisa mudar, diga para preservar.
 
-As 5 métricas, nesta ordem, devem ser: Gancho 0–2s, Retenção, Curiosidade, Compartilhamento, Conversão em seguidores.`;
+As 5 métricas, nesta ordem: Gancho 0–2s, Retenção, Curiosidade, Compartilhamento, Conversão em seguidores.`;
 
 function extractOutputText(data: any) {
   if (typeof data?.output_text === "string") return data.output_text;
@@ -78,10 +109,21 @@ export async function POST(request: Request) {
     const mode = String(body?.mode || "script");
     const goal = String(body?.goal || "views");
     const niche = String(body?.niche || "").trim();
-    if (!text) return NextResponse.json({ error: "Envie um conteúdo para analisar." }, { status: 400 });
-    if (text.length > 18000) return NextResponse.json({ error: "Conteúdo muito longo para esta versão do MVP." }, { status: 400 });
+    const videoDuration = Number(body?.videoDuration || 0);
+    const videoName = String(body?.videoName || "");
+    const frames = Array.isArray(body?.frames) ? body.frames.filter((x: unknown) => typeof x === "string").slice(0, 3) : [];
 
-    const input = `TIPO: ${mode}\nOBJETIVO: ${goal}\nNICHO INFORMADO: ${niche || "não informado; inferir"}\n\nCONTEÚDO:\n${text}`;
+    if (!text && frames.length === 0) return NextResponse.json({ error: "Envie conteúdo ou vídeo para analisar." }, { status: 400 });
+    if (text.length > 18000) return NextResponse.json({ error: "Conteúdo muito longo para esta versão." }, { status: 400 });
+    if (frames.some((frame: string) => frame.length > 1_800_000)) return NextResponse.json({ error: "Os frames do vídeo ficaram grandes demais. Tente outro vídeo." }, { status: 413 });
+
+    const contextText = `TIPO: ${mode}\nOBJETIVO: ${goal}\nNICHO INFORMADO: ${niche || "não informado; inferir"}\nARQUIVO: ${videoName || "não informado"}\nDURAÇÃO DO VÍDEO: ${videoDuration ? `${videoDuration.toFixed(1)} segundos` : "não informada"}\nFRAMES DOS PRIMEIROS 3s: ${frames.length ? `${frames.length} frames anexados em ordem cronológica` : "não anexados"}\n\nCONTEXTO / ROTEIRO / TRANSCRIÇÃO:\n${text || "não fornecido"}`;
+
+    const content: any[] = [{ type: "input_text", text: contextText }];
+    frames.forEach((imageUrl: string, index: number) => {
+      content.push({ type: "input_text", text: `Frame ${index + 1} dos primeiros 3 segundos:` });
+      content.push({ type: "input_image", image_url: imageUrl, detail: "low" });
+    });
 
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -90,12 +132,12 @@ export async function POST(request: Request) {
         model: "gpt-5.6-luna",
         reasoning: { effort: "low" },
         instructions,
-        input,
-        max_output_tokens: 2600,
+        input: [{ role: "user", content }],
+        max_output_tokens: 3200,
         store: false,
         text: {
           verbosity: "low",
-          format: { type: "json_schema", name: "viraupp_analysis", strict: true, schema }
+          format: { type: "json_schema", name: "viraupp_video_analysis", strict: true, schema }
         }
       })
     });
@@ -109,9 +151,7 @@ export async function POST(request: Request) {
 
     const output = extractOutputText(data);
     if (!output) return NextResponse.json({ error: "A IA não retornou uma análise utilizável." }, { status: 502 });
-
-    const analysis = JSON.parse(output);
-    return NextResponse.json(analysis);
+    return NextResponse.json(JSON.parse(output));
   } catch (error) {
     console.error(error);
     return NextResponse.json({ error: "Erro interno ao analisar o conteúdo." }, { status: 500 });
