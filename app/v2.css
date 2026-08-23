@@ -1,0 +1,18 @@
+.risk-baixo { background: linear-gradient(90deg, #84cc16, #a3e635); }
+.risk-medio { background: linear-gradient(90deg, #eab308, #facc15); }
+.risk-alto { background: linear-gradient(90deg, #f43f5e, #fb7185); }
+.risk-text-baixo { color: #bef264; }
+.risk-text-medio { color: #fde047; }
+.risk-text-alto { color: #fda4af; }
+.vu-first-diagnosis { color: #e4e4e7; font-size: 17px; line-height: 1.65; }
+.vu-action-text { font-size: 11px; letter-spacing: .7px; }
+.action-text-manter { color: #bef264; }
+.action-text-testar { color: #fde047; }
+.action-text-alterar { color: #fda4af; }
+.vu-edit-tip small { display: block; line-height: 1.45; margin-top: 6px; }
+
+@media (max-width: 700px) {
+  .vu-upload-box { min-height: 176px; }
+  .vu-time-period { font-size: 13px; }
+  .vu-card h2, .vu-score-copy h2 { font-size: 24px; }
+}

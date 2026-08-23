@@ -6,7 +6,7 @@ type Mode = "idea" | "script" | "video";
 type Goal = "views" | "followers" | "engagement" | "sales";
 type ActionType = "MANTER" | "TESTAR" | "ALTERAR";
 type Recommendation = "PUBLICAR" | "TESTAR" | "ALTERAR";
-type Attention = "Alta" | "Moderada" | "Baixa";
+type Risk = "baixo" | "médio" | "alto";
 
 type Metric = {
   label: string;
@@ -17,11 +17,19 @@ type Metric = {
 };
 
 type TimelineItem = {
-  period: string;
-  attention: Attention;
+  start: string;
+  end: string;
   score: number;
+  risk: Risk;
   diagnosis: string;
-  action: string;
+  suggestion: string;
+};
+
+type EditingSuggestion = {
+  timestamp: string;
+  action: ActionType;
+  suggestion: string;
+  reason: string;
 };
 
 type Analysis = {
@@ -40,15 +48,19 @@ type Analysis = {
   hashtags: string[];
   cta: string;
   pinnedComment: string;
-  first3Seconds?: {
+  visualHook: {
     score: number;
-    visualHook: string;
-    verbalHook: string;
-    textOnScreen: string;
-    recommendation: string;
+    action: ActionType;
+    diagnosis: string;
+    suggestion: string;
   };
-  timeline?: TimelineItem[];
-  editingTips?: string[];
+  firstThreeSeconds: {
+    diagnosis: string;
+    strengths: string[];
+    risks: string[];
+  };
+  retentionTimeline: TimelineItem[];
+  editingSuggestions: EditingSuggestion[];
 };
 
 const modeLabel: Record<Mode, string> = {
@@ -64,7 +76,9 @@ const goalLabel: Record<Goal, string> = {
   sales: "Mais vendas",
 };
 
-async function captureFrames(file: File) {
+type CapturedFrame = { timestamp: number; imageUrl: string };
+
+async function captureFrames(file: File): Promise<{ frames: CapturedFrame[]; duration: number }> {
   const url = URL.createObjectURL(file);
   const video = document.createElement("video");
   video.src = url;
@@ -78,12 +92,15 @@ async function captureFrames(file: File) {
   });
 
   const duration = Number.isFinite(video.duration) ? video.duration : 0;
-  const maxFirstWindow = Math.min(3, Math.max(0.15, duration - 0.05));
-  const times = [0.12, Math.min(1.5, maxFirstWindow * 0.52), Math.min(2.9, maxFirstWindow)]
-    .map((t) => Math.max(0, Math.min(t, Math.max(0, duration - 0.05))));
+  if (!duration || duration > 600) {
+    URL.revokeObjectURL(url);
+    throw new Error(duration > 600 ? "Use um vídeo de até 10 minutos." : "Não foi possível identificar a duração do vídeo.");
+  }
+  const lastFrame = Math.max(0, duration - 0.05);
+  const times = [0, 0.5, 1, 1.5, 2, 3].map((t) => Math.min(t, lastFrame));
 
   const uniqueTimes = Array.from(new Set(times.map((t) => Number(t.toFixed(2)))));
-  const frames: string[] = [];
+  const frames: CapturedFrame[] = [];
 
   for (const time of uniqueTimes) {
     video.currentTime = time;
@@ -92,14 +109,14 @@ async function captureFrames(file: File) {
       video.addEventListener("seeked", done, { once: true });
     });
 
-    const scale = Math.min(1, 720 / Math.max(video.videoWidth || 720, video.videoHeight || 1280));
+    const scale = Math.min(1, 640 / Math.max(video.videoWidth || 720, video.videoHeight || 1280));
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round((video.videoWidth || 720) * scale));
     canvas.height = Math.max(1, Math.round((video.videoHeight || 1280) * scale));
     const ctx = canvas.getContext("2d");
     if (!ctx) continue;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    frames.push(canvas.toDataURL("image/jpeg", 0.68));
+    frames.push({ timestamp: time, imageUrl: canvas.toDataURL("image/jpeg", 0.62) });
   }
 
   URL.revokeObjectURL(url);
@@ -115,6 +132,7 @@ export default function Home() {
   );
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreview, setVideoPreview] = useState("");
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
   const [result, setResult] = useState<Analysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -137,17 +155,21 @@ export default function Home() {
   function handleVideo(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("video/")) {
-      setError("Selecione um arquivo de vídeo.");
+    const allowedTypes = ["video/mp4", "video/quicktime", "video/webm"];
+    if (!allowedTypes.includes(file.type)) {
+      setError("Formato não aceito. Envie um vídeo MP4, MOV ou WEBM.");
+      e.target.value = "";
       return;
     }
-    if (file.size > 250 * 1024 * 1024) {
-      setError("Para este MVP, use vídeos de até 250 MB.");
+    if (file.size > 200 * 1024 * 1024) {
+      setError("O arquivo é grande demais. Envie um vídeo de até 200 MB.");
+      e.target.value = "";
       return;
     }
     if (videoPreview) URL.revokeObjectURL(videoPreview);
     setVideoFile(file);
     setVideoPreview(URL.createObjectURL(file));
+    setVideoDuration(null);
     setMode("video");
     setError("");
   }
@@ -164,12 +186,13 @@ export default function Home() {
     setResult(null);
 
     try {
-      let frames: string[] = [];
-      let videoDuration = 0;
+      let frames: CapturedFrame[] = [];
+      let capturedDuration = 0;
       if (mode === "video" && videoFile) {
         const captured = await captureFrames(videoFile);
         frames = captured.frames;
-        videoDuration = captured.duration;
+        capturedDuration = captured.duration;
+        setVideoDuration(captured.duration);
       }
 
       const response = await fetch("/api/analyze", {
@@ -181,8 +204,10 @@ export default function Home() {
           niche,
           text,
           frames,
-          videoDuration,
+          videoDuration: capturedDuration,
           videoName: videoFile?.name || "",
+          videoType: videoFile?.type || "",
+          videoSize: videoFile?.size || 0,
         }),
       });
 
@@ -237,12 +262,12 @@ export default function Home() {
           {mode === "video" && (
             <div className="vu-upload-wrap">
               <label className="vu-upload-box">
-                <input className="vu-file-input" type="file" accept="video/*" onChange={handleVideo} />
+                <input className="vu-file-input" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" onChange={handleVideo} />
                 <div className="vu-upload-icon">↥</div>
                 <strong>{videoFile ? "Trocar vídeo" : "Enviar vídeo"}</strong>
-                <span>{videoFile ? `${videoFile.name} · ${(videoFile.size / 1024 / 1024).toFixed(1)} MB` : "TikTok, Reels ou Shorts · até 250 MB"}</span>
+                <span>{videoFile ? `${videoFile.name} · ${(videoFile.size / 1024 / 1024).toFixed(1)} MB${videoDuration ? ` · ${Math.floor(videoDuration / 60)}:${String(Math.round(videoDuration % 60)).padStart(2, "0")}` : ""}` : "MP4, MOV ou WEBM · até 200 MB"}</span>
               </label>
-              {videoPreview && <div className="vu-video-preview"><video src={videoPreview} controls playsInline preload="metadata" /><div><b>Leitura visual:</b> a V2 extrai quadros dos primeiros 3s no seu aparelho e envia apenas esses frames para análise visual.</div></div>}
+              {videoPreview && <div className="vu-video-preview"><video src={videoPreview} controls playsInline preload="metadata" onLoadedMetadata={(event) => setVideoDuration(event.currentTarget.duration)} /><div><b>Leitura visual:</b> seis quadros entre 0s e 3s são comprimidos no seu aparelho. O vídeo completo não é enviado à IA.</div></div>}
             </div>
           )}
 
@@ -267,13 +292,13 @@ export default function Home() {
           <div className="vu-score-meta"><div className="vu-kpi"><span>Confiança</span><strong>{result.confidence}</strong></div><div className="vu-kpi"><span>Nicho provável</span><strong>{result.niche}</strong></div><div className="vu-kpi"><span>Confiança do nicho</span><strong>{result.nicheConfidence}%</strong></div><div className="vu-kpi"><span>Probabilidade</span><strong>{result.performanceProbability}</strong></div></div>
         </section>
 
-        {result.first3Seconds && <section className="vu-card vu-first3"><div className="vu-card-head"><div><p className="vu-eyebrow">GANCHO VISUAL + VERBAL</p><h2>2. Os primeiros 3 segundos</h2></div><div className="vu-three-score">{result.first3Seconds.score}<small>/100</small></div></div><div className="vu-first3-grid"><div><span>👀 Visual</span><p>{result.first3Seconds.visualHook}</p></div><div><span>🎙️ Fala</span><p>{result.first3Seconds.verbalHook}</p></div><div><span>🔤 Texto na tela</span><p>{result.first3Seconds.textOnScreen}</p></div></div><div className="vu-priority"><b>Recomendação:</b> {result.first3Seconds.recommendation}</div></section>}
+        <section className="vu-card vu-first3"><div className="vu-card-head"><div><p className="vu-eyebrow">GANCHO VISUAL</p><h2>2. Primeiros 3 segundos</h2></div><div className="vu-three-score">{result.visualHook.score}<small>/100</small></div></div><div className={`vu-action-badge action-${result.visualHook.action.toLowerCase()}`}>{result.visualHook.action}</div><p className="vu-first-diagnosis">{result.visualHook.diagnosis}</p><div className="vu-first3-grid"><div><span>✓ FORÇAS</span>{result.firstThreeSeconds.strengths.map((item) => <p key={item}>{item}</p>)}</div><div><span>⚠ RISCOS</span>{result.firstThreeSeconds.risks.map((item) => <p key={item}>{item}</p>)}</div><div><span>→ AÇÃO PRÁTICA</span><p>{result.visualHook.suggestion}</p></div></div><div className="vu-priority"><b>Leitura integrada:</b> {result.firstThreeSeconds.diagnosis}</div></section>
 
-        {result.timeline && result.timeline.length > 0 && <section className="vu-card"><div className="vu-card-head"><div><p className="vu-eyebrow">RETENÇÃO ESTIMADA</p><h2>3. Timeline — onde a atenção pode cair</h2></div><div className="vu-soft-badge">Por trecho</div></div><div className="vu-timeline">{result.timeline.map((item, index) => <div className="vu-time-row" key={`${item.period}-${index}`}><div className="vu-time-period">{item.period}</div><div className="vu-time-bar"><div className={`vu-time-fill attention-${item.attention.toLowerCase()}`} style={{ width: `${item.score}%` }} /></div><div className="vu-time-score">{item.score}</div><div className="vu-time-copy"><span className={`vu-attention attention-text-${item.attention.toLowerCase()}`}>{item.attention}</span><strong>{item.diagnosis}</strong><p>{item.action}</p></div></div>)}</div><p className="vu-disclaimer">A timeline é uma estimativa de risco de retenção baseada no conteúdo disponível; não representa dados reais do TikTok, Reels ou Shorts.</p></section>}
+        {result.retentionTimeline.length > 0 && <section className="vu-card"><div className="vu-card-head"><div><p className="vu-eyebrow">RETENÇÃO ESTIMADA</p><h2>3. Timeline — risco estimado de queda</h2></div><div className="vu-soft-badge">Potencial por trecho</div></div><div className="vu-timeline">{result.retentionTimeline.map((item, index) => <div className="vu-time-row" key={`${item.start}-${index}`}><div className="vu-time-period">{item.start}–{item.end}</div><div className="vu-time-bar"><div className={`vu-time-fill risk-${item.risk.replace("é", "e")}`} style={{ width: `${item.score}%` }} /></div><div className="vu-time-score">{item.score}</div><div className="vu-time-copy"><span className={`vu-attention risk-text-${item.risk.replace("é", "e")}`}>RISCO {item.risk}</span><strong>{item.diagnosis}</strong><p>{item.suggestion}</p></div></div>)}</div><p className="vu-disclaimer">Estimativa de potencial de retenção baseada no material enviado. Não representa retenção real do TikTok, Reels ou Shorts.</p></section>}
 
         <section className="vu-card"><div className="vu-card-head"><h2>4. O que manter, testar ou alterar</h2><div className="vu-soft-badge">Direto ao ponto</div></div><div className="vu-metric-grid">{result.metrics.map((metric) => <div className="vu-metric-card" key={metric.label}><div className="vu-metric-top"><strong>{metric.label}</strong><span>{metric.score}/100</span></div><div className={`vu-action-badge action-${metric.action.toLowerCase()}`}>{metric.action}</div><p>{metric.why}</p><div className="vu-suggestion-box"><b>Sugestão:</b> {metric.suggestion}</div></div>)}</div></section>
 
-        {result.editingTips && result.editingTips.length > 0 && <section className="vu-card"><div className="vu-card-head"><div><p className="vu-eyebrow">EDIÇÃO</p><h2>5. Ajustes de maior impacto</h2></div></div><div className="vu-edit-grid">{result.editingTips.map((tip, i) => <div className="vu-edit-tip" key={tip}><span>{String(i + 1).padStart(2, "0")}</span><p>{tip}</p></div>)}</div></section>}
+        {result.editingSuggestions.length > 0 && <section className="vu-card"><div className="vu-card-head"><div><p className="vu-eyebrow">EDIÇÃO</p><h2>5. Como eu editaria esse vídeo</h2></div></div><div className="vu-edit-grid">{result.editingSuggestions.map((tip, i) => <div className="vu-edit-tip" key={`${tip.timestamp}-${i}`}><span>{tip.timestamp}</span><div><b className={`vu-action-text action-text-${tip.action.toLowerCase()}`}>{tip.action}</b><p>{tip.suggestion}</p><small>{tip.reason}</small></div></div>)}</div></section>}
 
         <section className="vu-card"><div className="vu-card-head"><h2>6. Pacote pronto para postar</h2><div className="vu-soft-badge">Post Pack</div></div><div className="vu-publish-grid"><div className="vu-pack-card"><span>🖼️ CAPA</span><strong>{result.cover}</strong></div><div className="vu-pack-card"><span>📝 LEGENDA</span><strong>{result.caption}</strong></div><div className="vu-pack-card"><span>#️⃣ 3 HASHTAGS</span><strong>{result.hashtags.join(" ")}</strong></div><div className="vu-pack-card"><span>💬 CTA</span><strong>{result.cta}</strong></div><div className="vu-pack-card vu-pack-wide"><span>📌 COMENTÁRIO FIXADO</span><strong>{result.pinnedComment}</strong></div></div></section>
 
